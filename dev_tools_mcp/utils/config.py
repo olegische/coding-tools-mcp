@@ -19,6 +19,10 @@ class ServiceConfig(BaseSettings):
     # --- Feature Flags ---
     # Enables the Code Knowledge Graph (CKG) tool for code searching.
     FEATURE_CKG_ENABLED: bool = False
+    # Enables the Sequential Thinking tool for dynamic problem-solving.
+    FEATURE_SEQUENTIAL_THINKING_ENABLED: bool = False
+    # Enables the JSON Editor tool for JSONPath-based JSON editing.
+    FEATURE_JSON_EDITOR_ENABLED: bool = False
 
     class Config:
         """Pydantic configuration settings."""

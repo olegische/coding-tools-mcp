@@ -103,7 +103,6 @@ async def file_system_tool(
     Tool for exploring the file system and managing the session state.
     
     Provides commands for navigation (pwd, ls, cd) and session management (lock_cwd, unlock_cwd).
-    For reading files, use file_editor.view instead.
     
     Args:
         subcommand: The operation to perform:
@@ -149,10 +148,9 @@ async def directory_explorer_tool(
 ) -> dict[str, Any]:
     """
     Advanced tool for exploring directory structures with detailed information.
-    This tool works in BOTH 'discovery' and 'edit' phases - no locking required.
     
     Provides comprehensive directory analysis including file listing, tree visualization,
-    and content searching. All operations are READ-ONLY and safe for discovery phase.
+    and content searching. All operations are read-only.
 
     Args:
         subcommand: The operation to perform. Can be 'list', 'tree', or 'search'.
@@ -200,7 +198,7 @@ async def bash(
     restart: bool = False,
 ) -> dict[str, Any]:
     """
-    Executes a shell command in a persistent session.
+    Executes shell commands in a persistent session.
 
     Args:
         command: The command to execute.
@@ -246,7 +244,6 @@ async def file_editor_tool(
     A powerful tool for file manipulation (view, create, str_replace, insert).
     
     Use 'view' to read files and directories. Use other commands to edit files.
-    If editing fails, try calling file_system.lock_cwd() first.
 
     Args:
         command: The type of operation. Can be 'view', 'create', 'str_replace', or 'insert'.
@@ -293,63 +290,68 @@ async def file_editor_tool(
         return {"status": "error", "error": str(e), "exit_code": 1}
 
 
-@mcp_app.tool()
-async def json_editor(
-    context: Context,
-    operation: str,
-    file_path: str,
-    json_path: Optional[str] = None,
-    value: Optional[Any] = None,
-    pretty_print: bool = True,
-) -> dict[str, Any]:
-    """
-    Tool for editing JSON files with JSONPath expressions.
-    
-    Supports viewing and editing JSON files with JSONPath syntax.
-    If editing fails, try calling file_system.lock_cwd() first.
+# --- JSON Editor Tool (Feature Flagged) ---
+if server_config.FEATURE_JSON_EDITOR_ENABLED:
+    logger.info("JSON Editor feature is enabled. Registering 'json_editor' tool.")
 
-    Args:
-        operation: The operation to perform. Can be 'view', 'set', 'add', or 'remove'.
-        file_path: The path to the JSON file, relative to the current working directory (CWD).
-        json_path: JSONPath expression to specify the target location.
-        value: The JSON-serializable value to set or add.
-        pretty_print: Whether to format the JSON output with indentation.
+    @mcp_app.tool()
+    async def json_editor(
+        context: Context,
+        operation: str,
+        file_path: str,
+        json_path: Optional[str] = None,
+        value: Optional[Any] = None,
+        pretty_print: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Tool for editing JSON files with JSONPath expressions.
+        
+        Supports viewing and editing JSON files with JSONPath syntax.
 
-    Returns:
-        A dictionary containing the result of the operation.
-    """
-    logger.info(f"Executing json_editor operation '{operation}' on file '{file_path}'")
-    try:
-        session_manager = get_session_manager()
-        session_id = context.request_context.request.query_params.get("session_id") or "default"
-        state = session_manager.get_fs_state(session_id)
-        if state.phase != "edit":
-            raise ToolError("Cannot use the json_editor tool in 'discovery' phase. Use file_system.lock_cwd() first.")
+        Args:
+            operation: The operation to perform. Can be 'view', 'set', 'add', or 'remove'.
+            file_path: The path to the JSON file, relative to the current working directory (CWD).
+            json_path: JSONPath expression to specify the target location.
+            value: The JSON-serializable value to set or add.
+            pretty_print: Whether to format the JSON output with indentation.
 
-        # Warn if git repository is not available (but don't fail)
-        if not state.git_root:
-            logger.warning("No git repository found - git diff functionality will not be available")
+        Returns:
+            A dictionary containing the result of the operation.
+        """
+        logger.info(f"Executing json_editor operation '{operation}' on file '{file_path}'")
+        try:
+            session_manager = get_session_manager()
+            session_id = context.request_context.request.query_params.get("session_id") or "default"
+            state = session_manager.get_fs_state(session_id)
+            if state.phase != "edit":
+                raise ToolError("Cannot use the json_editor tool in 'discovery' phase. Use file_system.lock_cwd() first.")
 
-        json_editor_tool = get_json_editor_tool_provider()
-        args = {
-            "operation": operation,
-            "file_path": file_path,
-            "json_path": json_path,
-            "value": value,
-            "pretty_print": pretty_print,
-            "_fs_state": state,
-        }
-        # Filter out None values for optional tool arguments
-        args = {k: v for k, v in args.items() if v is not None}
+            # Warn if git repository is not available (but don't fail)
+            if not state.git_root:
+                logger.warning("No git repository found - git diff functionality will not be available")
 
-        result = await json_editor_tool.execute(args)
-        if result.error:
-            return {"status": "error", "error": result.error, "exit_code": result.error_code}
-        return {"status": "success", "result": result.output, "exit_code": result.error_code}
+            json_editor_tool = get_json_editor_tool_provider()
+            args = {
+                "operation": operation,
+                "file_path": file_path,
+                "json_path": json_path,
+                "value": value,
+                "pretty_print": pretty_print,
+                "_fs_state": state,
+            }
+            # Filter out None values for optional tool arguments
+            args = {k: v for k, v in args.items() if v is not None}
 
-    except Exception as e:
-        logger.error(f"Error executing json_editor operation: {e}", exc_info=True)
-        return {"status": "error", "error": str(e), "exit_code": 1}
+            result = await json_editor_tool.execute(args)
+            if result.error:
+                return {"status": "error", "error": result.error, "exit_code": result.error_code}
+            return {"status": "success", "result": result.output, "exit_code": result.error_code}
+
+        except Exception as e:
+            logger.error(f"Error executing json_editor operation: {e}", exc_info=True)
+            return {"status": "error", "error": str(e), "exit_code": 1}
+else:
+    logger.warning("JSON Editor feature is disabled. The 'json_editor' tool will not be available.")
 
 
 # --- CKG Tool (Feature Flagged) ---
@@ -409,10 +411,9 @@ async def git_tool(
     file_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """
-    A comprehensive tool for interacting with a Git repository.
+    A comprehensive tool for interacting with Git repositories.
     
     Supports common git operations: status, diff, add, commit, restore.
-    Requires a git repository in the working directory.
 
     Args:
         command: The git command to execute. Must be one of: 'status', 'diff', 'add', 'commit', 'restore'.
@@ -459,60 +460,66 @@ async def git_tool(
         return {"status": "error", "error": str(e), "exit_code": 1}
 
 
-@mcp_app.tool()
-async def sequential_thinking(
-    context: Context,
-    thought: str,
-    next_thought_needed: bool,
-    thought_number: int,
-    total_thoughts: int,
-    is_revision: Optional[bool] = None,
-    revises_thought: Optional[int] = None,
-    branch_from_thought: Optional[int] = None,
-    branch_id: Optional[str] = None,
-    needs_more_thoughts: Optional[bool] = None,
-) -> dict[str, Any]:
-    """
-    A tool for dynamic and reflective problem-solving through thoughts.
+# --- Sequential Thinking Tool (Feature Flagged) ---
+if server_config.FEATURE_SEQUENTIAL_THINKING_ENABLED:
+    logger.info("Sequential Thinking feature is enabled. Registering 'sequential_thinking' tool.")
 
-    Args:
-        thought: Your current thinking step.
-        next_thought_needed: Whether another thought step is needed.
-        thought_number: Current thought number (min: 1).
-        total_thoughts: Estimated total thoughts needed (min: 1).
-        is_revision: Whether this revises previous thinking.
-        revises_thought: Which thought is being reconsidered (min: 1).
-        branch_from_thought: Branching point thought number (min: 1).
-        branch_id: Branch identifier.
-        needs_more_thoughts: If more thoughts are needed.
+    @mcp_app.tool()
+    async def sequential_thinking(
+        context: Context,
+        thought: str,
+        next_thought_needed: bool,
+        thought_number: int,
+        total_thoughts: int,
+        is_revision: Optional[bool] = None,
+        revises_thought: Optional[int] = None,
+        branch_from_thought: Optional[int] = None,
+        branch_id: Optional[str] = None,
+        needs_more_thoughts: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        """
+        A tool for dynamic and reflective problem-solving through thoughts.
 
-    Returns:
-        A dictionary containing the status of the thinking process.
-    """
-    logger.info(f"Executing sequential_thinking step {thought_number}/{total_thoughts}")
-    try:
-        thinking_tool = get_sequential_thinking_tool_provider()
-        args = {
-            "thought": thought,
-            "next_thought_needed": next_thought_needed,
-            "thought_number": thought_number,
-            "total_thoughts": total_thoughts,
-            "is_revision": is_revision,
-            "revises_thought": revises_thought,
-            "branch_from_thought": branch_from_thought,
-            "branch_id": branch_id,
-            "needs_more_thoughts": needs_more_thoughts,
-        }
-        args = {k: v for k, v in args.items() if v is not None}
+        Args:
+            thought: Your current thinking step.
+            next_thought_needed: Whether another thought step is needed.
+            thought_number: Current thought number (min: 1).
+            total_thoughts: Estimated total thoughts needed (min: 1).
+            is_revision: Whether this revises previous thinking.
+            revises_thought: Which thought is being reconsidered (min: 1).
+            branch_from_thought: Branching point thought number (min: 1).
+            branch_id: Branch identifier.
+            needs_more_thoughts: If more thoughts are needed.
 
-        result = await thinking_tool.execute(args)
-        if result.error:
-            return {"status": "error", "error": result.error, "exit_code": result.error_code}
-        return {"status": "success", "result": result.output, "exit_code": result.error_code}
+        Returns:
+            A dictionary containing the status of the thinking process.
+        """
+        logger.info(f"Executing sequential_thinking step {thought_number}/{total_thoughts}")
+        try:
+            thinking_tool = get_sequential_thinking_tool_provider()
+            args = {
+                "thought": thought,
+                "next_thought_needed": next_thought_needed,
+                "thought_number": thought_number,
+                "total_thoughts": total_thoughts,
+                "is_revision": is_revision,
+                "revises_thought": revises_thought,
+                "branch_from_thought": branch_from_thought,
+                "branch_id": branch_id,
+                "needs_more_thoughts": needs_more_thoughts,
+            }
+            args = {k: v for k, v in args.items() if v is not None}
 
-    except Exception as e:
-        logger.error(f"Error executing sequential_thinking: {e}", exc_info=True)
-        return {"status": "error", "error": str(e), "exit_code": 1}
+            result = await thinking_tool.execute(args)
+            if result.error:
+                return {"status": "error", "error": result.error, "exit_code": result.error_code}
+            return {"status": "success", "result": result.output, "exit_code": result.error_code}
+
+        except Exception as e:
+            logger.error(f"Error executing sequential_thinking: {e}", exc_info=True)
+            return {"status": "error", "error": str(e), "exit_code": 1}
+else:
+    logger.warning("Sequential Thinking feature is disabled. The 'sequential_thinking' tool will not be available.")
 
 # --- Static Prompts for FastMCP ---
 # These are static prompts that FastMCP can use without requiring arguments

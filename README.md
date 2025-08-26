@@ -44,7 +44,7 @@ Powerful file manipulation tool:
 - `str_replace` - replace strings in files
 - `insert` - insert text at specific lines
 
-#### `json_editor`
+#### `json_editor` (optional)
 Precise JSON file editing with JSONPath:
 - `view` - view JSON data
 - `set` - set values
@@ -79,7 +79,7 @@ Intelligent search using Code Knowledge Graph:
 
 ### 🧠 Meta Tools
 
-#### `sequential_thinking`
+#### `sequential_thinking` (optional)
 Structured thinking for complex tasks:
 - Record reasoning steps
 - Branch and revise thoughts
@@ -133,6 +133,8 @@ The server is configured through environment variables:
 | `MCP_HOST` | Host for server binding | `"0.0.0.0"` |
 | `MCP_PORT` | Port for listening | `8660` |
 | `FEATURE_CKG_ENABLED` | Enable Code Knowledge Graph | `false` |
+| `FEATURE_SEQUENTIAL_THINKING_ENABLED` | Enable Sequential Thinking tool | `false` |
+| `FEATURE_JSON_EDITOR_ENABLED` | Enable JSON Editor tool | `false` |
 | `LOG_LEVEL` | Logging level | `"INFO"` |
 
 ### Configuration Examples
@@ -149,6 +151,18 @@ dev-tools-mcp
 export MCP_TRANSPORT=sse
 export MCP_PORT=8660
 export FEATURE_CKG_ENABLED=true
+dev-tools-mcp
+```
+
+**Enable Sequential Thinking tool:**
+```bash
+export FEATURE_SEQUENTIAL_THINKING_ENABLED=true
+dev-tools-mcp
+```
+
+**Enable JSON Editor tool:**
+```bash
+export FEATURE_JSON_EDITOR_ENABLED=true
 dev-tools-mcp
 ```
 
