@@ -264,15 +264,49 @@ You should:
             context = ""
 
         header = f"{prefix} {thought_data.thought_number}/{thought_data.total_thoughts}{context}"
-        border_length = max(len(header), len(thought_data.thought)) + 4
+        
+        # Split thought into lines to handle multi-line thoughts properly
+        thought_lines = thought_data.thought.split('\n')
+        
+        # Calculate the maximum visual width needed
+        max_width = max(
+            self._visual_width(header),
+            max(self._visual_width(line) for line in thought_lines) if thought_lines else 0
+        )
+        
+        # Add padding
+        border_length = max_width + 4
         border = "─" * border_length
+        
+        # Format header
+        header_padding = border_length - 2 - self._visual_width(header)
+        formatted_header = f"│ {header}{' ' * header_padding} │"
+        
+        # Format thought lines
+        formatted_lines = []
+        for line in thought_lines:
+            line_padding = border_length - 2 - self._visual_width(line)
+            formatted_lines.append(f"│ {line}{' ' * line_padding} │")
+        
+        # Combine all parts
+        result = f"┌{border}┐\n{formatted_header}\n├{border}┤\n"
+        result += "\n".join(formatted_lines)
+        result += f"\n└{border}┘"
+        
+        return result
 
-        return f"""
-┌{border}┐
-│ {header.ljust(border_length - 2)} │
-├{border}┤
-│ {thought_data.thought.ljust(border_length - 2)} │
-└{border}┘"""
+    def _visual_width(self, text: str) -> int:
+        """Calculate the visual width of text, accounting for Unicode characters."""
+        import unicodedata
+        width = 0
+        for char in text:
+            # East Asian characters (including emojis) are typically wider
+            if unicodedata.east_asian_width(char) in ('F', 'W'):
+                width += 2
+            elif unicodedata.combining(char) == 0:  # Non-combining characters
+                width += 1
+            # Combining characters don't add width
+        return width
 
     @override
     async def execute(self, arguments: ToolCallArguments) -> ToolExecResult:
