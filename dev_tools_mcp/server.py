@@ -12,18 +12,22 @@ from starlette.middleware import Middleware
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from dev_tools_mcp.prompts import get_prompts
-from dev_tools_mcp.tools.base import Tool
+from dev_tools_mcp.prompts import get_all_prompts
+from dev_tools_mcp.tools.base import Tool, ToolError
 from dev_tools_mcp.utils.config import ServiceConfig
 from dev_tools_mcp.utils.dependencies import (
     get_base_config,
     get_bash_tool_provider,
-    get_file_editor_tool_provider,
-    get_json_editor_tool_provider,
     get_code_search_tool_provider,
+    get_file_editor_tool_provider,
+    get_file_system_tool_provider,
+    get_directory_explorer_tool_provider,
     get_git_tool_provider,
+    get_json_editor_tool_provider,
+    get_session_manager,
     get_sequential_thinking_tool_provider,
 )
+from dev_tools_mcp.utils.session_manager import SessionManager
 
 
 # Get a module-level logger
@@ -85,13 +89,109 @@ mcp_app = build_server(server_config)
 
 
 # --- Prompt Handlers ---
-@mcp_app.prompt(title="Agent System Prompt for Dev Tools")
-def get_system_prompt() -> str:
-    """Provides the main system prompt for the agent."""
-    prompts = get_prompts()
-    return prompts["agent-system-prompt"]
+# FastMCP prompts must be static strings, not functions
 
 # --- Tool Definitions ---
+
+@mcp_app.tool(name="file_system")
+async def file_system_tool(
+    context: Context,
+    subcommand: str,
+    path: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Tool for exploring the file system and managing the session state.
+    
+    Provides commands for navigation (pwd, ls, cd) and session management (lock_cwd, unlock_cwd).
+    For reading files, use file_editor.view instead.
+    
+    Args:
+        subcommand: The operation to perform:
+            - 'pwd': Show current working directory
+            - 'ls': List files in directory
+            - 'cd': Change directory
+            - 'lock_cwd': Lock current directory for editing
+            - 'unlock_cwd': Unlock directory
+        path: The path for 'ls' or 'cd'. Can be relative or absolute.
+
+    Returns:
+        A dictionary containing the result of the operation.
+    """
+    logger.info(f"Executing file_system command '{subcommand}'")
+    try:
+        session_manager = get_session_manager()
+        session_id = context.request_context.request.query_params.get("session_id") or "default"
+        state = session_manager.get_fs_state(session_id)
+
+        tool = get_file_system_tool_provider()
+        args = {"subcommand": subcommand, "path": path, "_fs_state": state}
+        args = {k: v for k, v in args.items() if v is not None}
+
+        result = await tool.execute(args)
+        if result.error:
+            return {"status": "error", "error": result.error, "exit_code": result.error_code}
+        return {"status": "success", "result": result.output, "exit_code": result.error_code}
+
+    except Exception as e:
+        logger.error(f"Error executing file_system command: {e}", exc_info=True)
+        return {"status": "error", "error": str(e), "exit_code": 1}
+
+
+@mcp_app.tool(name="directory_explorer")
+async def directory_explorer_tool(
+    context: Context,
+    subcommand: str,
+    path: Optional[str] = None,
+    recursive: Optional[bool] = None,
+    limit: Optional[int] = None,
+    query: Optional[str] = None,
+    file_pattern: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Advanced tool for exploring directory structures with detailed information.
+    This tool works in BOTH 'discovery' and 'edit' phases - no locking required.
+    
+    Provides comprehensive directory analysis including file listing, tree visualization,
+    and content searching. All operations are READ-ONLY and safe for discovery phase.
+
+    Args:
+        subcommand: The operation to perform. Can be 'list', 'tree', or 'search'.
+        path: The path for the operation. Can be relative or absolute. Defaults to current directory.
+        recursive: Whether to traverse directories recursively (for list and tree commands).
+        limit: Maximum number of files to return (for list and tree commands). Default: 100.
+        query: Search query for the 'search' command.
+        file_pattern: File pattern to search in (e.g., '*.py', '*.js'). Default: all files.
+
+    Returns:
+        A dictionary containing the result of the operation.
+    """
+    logger.info(f"Executing directory_explorer command '{subcommand}'")
+    try:
+        session_manager = get_session_manager()
+        session_id = context.request_context.request.query_params.get("session_id") or "default"
+        state = session_manager.get_fs_state(session_id)
+
+        tool = get_directory_explorer_tool_provider()
+        args = {
+            "subcommand": subcommand,
+            "path": path,
+            "recursive": recursive,
+            "limit": limit,
+            "query": query,
+            "file_pattern": file_pattern,
+            "_fs_state": state,
+        }
+        args = {k: v for k, v in args.items() if v is not None}
+
+        result = await tool.execute(args)
+        if result.error:
+            return {"status": "error", "error": result.error, "exit_code": result.error_code}
+        return {"status": "success", "result": result.output, "exit_code": result.error_code}
+
+    except Exception as e:
+        logger.error(f"Error executing directory_explorer command: {e}", exc_info=True)
+        return {"status": "error", "error": str(e), "exit_code": 1}
+
 
 @mcp_app.tool()
 async def bash(
@@ -111,9 +211,14 @@ async def bash(
     """
     logger.info(f"Executing bash command: {command}")
     try:
+        session_manager = get_session_manager()
+        session_id = context.request_context.request.query_params.get("session_id") or "default"
+        state = session_manager.get_fs_state(session_id)
+        if state.phase != "edit":
+            raise ToolError("Cannot use the bash tool in 'discovery' phase. Use file_system.lock_cwd() first.")
+
         bash_tool = get_bash_tool_provider()
-        # The `execute` method of the tool expects a single dictionary of arguments.
-        args = {"command": command, "restart": restart}
+        args = {"command": command, "restart": restart, "_fs_state": state}
         result = await bash_tool.execute(args)
         return {
             "stdout": result.output,
@@ -139,10 +244,13 @@ async def file_editor_tool(
 ) -> dict[str, Any]:
     """
     A powerful tool for file manipulation (view, create, str_replace, insert).
+    
+    Use 'view' to read files and directories. Use other commands to edit files.
+    If editing fails, try calling file_system.lock_cwd() first.
 
     Args:
         command: The type of operation. Can be 'view', 'create', 'str_replace', or 'insert'.
-        path: The absolute path to the file or directory.
+        path: The path to the file or directory, relative to the current working directory (CWD).
         file_text: The content for a 'create' operation.
         old_str: The string to search for in a 'str_replace' operation. Must be unique.
         new_str: The replacement string for 'str_replace' or the content for 'insert'.
@@ -154,6 +262,13 @@ async def file_editor_tool(
     """
     logger.info(f"Executing file_editor command '{command}' on path '{path}'")
     try:
+        session_manager = get_session_manager()
+        session_id = context.request_context.request.query_params.get("session_id") or "default"
+        state = session_manager.get_fs_state(session_id)
+        # Allow 'view' command in both phases, but other commands require edit phase
+        if state.phase != "edit" and command != "view":
+            raise ToolError("Cannot use file editing commands in 'discovery' phase. Use file_system.lock_cwd() first. For reading files, use the 'view' command which works in both phases.")
+
         editor_tool = get_file_editor_tool_provider()
         args = {
             "command": command,
@@ -163,6 +278,7 @@ async def file_editor_tool(
             "new_str": new_str,
             "insert_line": insert_line,
             "view_range": view_range,
+            "_fs_state": state,
         }
         # Filter out None values so we don't pass them to the tool
         args = {k: v for k, v in args.items() if v is not None}
@@ -188,10 +304,13 @@ async def json_editor(
 ) -> dict[str, Any]:
     """
     Tool for editing JSON files with JSONPath expressions.
+    
+    Supports viewing and editing JSON files with JSONPath syntax.
+    If editing fails, try calling file_system.lock_cwd() first.
 
     Args:
         operation: The operation to perform. Can be 'view', 'set', 'add', or 'remove'.
-        file_path: The absolute path to the JSON file.
+        file_path: The path to the JSON file, relative to the current working directory (CWD).
         json_path: JSONPath expression to specify the target location.
         value: The JSON-serializable value to set or add.
         pretty_print: Whether to format the JSON output with indentation.
@@ -201,6 +320,16 @@ async def json_editor(
     """
     logger.info(f"Executing json_editor operation '{operation}' on file '{file_path}'")
     try:
+        session_manager = get_session_manager()
+        session_id = context.request_context.request.query_params.get("session_id") or "default"
+        state = session_manager.get_fs_state(session_id)
+        if state.phase != "edit":
+            raise ToolError("Cannot use the json_editor tool in 'discovery' phase. Use file_system.lock_cwd() first.")
+
+        # Warn if git repository is not available (but don't fail)
+        if not state.git_root:
+            logger.warning("No git repository found - git diff functionality will not be available")
+
         json_editor_tool = get_json_editor_tool_provider()
         args = {
             "operation": operation,
@@ -208,6 +337,7 @@ async def json_editor(
             "json_path": json_path,
             "value": value,
             "pretty_print": pretty_print,
+            "_fs_state": state,
         }
         # Filter out None values for optional tool arguments
         args = {k: v for k, v in args.items() if v is not None}
@@ -276,23 +406,37 @@ async def git_tool(
     base_commit: Optional[str] = None,
     message: Optional[str] = None,
     add_path: Optional[str] = None,
+    file_path: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     A comprehensive tool for interacting with a Git repository.
-    This tool is self-contained and operates on the specified repository path without changing the global working directory.
+    
+    Supports common git operations: status, diff, add, commit, restore.
+    Requires a git repository in the working directory.
 
     Args:
         command: The git command to execute. Must be one of: 'status', 'diff', 'add', 'commit', 'restore'.
-        path: The absolute path to the Git repository.
+        path: The path to the Git repository root, relative to the current working directory (CWD). e.g., '.'.
         base_commit: For the 'diff' command. The commit hash to diff against. If not provided, shows current uncommitted changes.
         message: For the 'commit' command. The commit message. This is a required argument for 'commit'.
         add_path: For 'add' and 'restore' commands. The path of files/directories to add or restore. Defaults to '.' (all files in the repo).
+        file_path: For the 'diff' command. The path to a specific file to see the diff for.
 
     Returns:
         A dictionary containing the result of the git operation.
     """
     logger.info(f"Executing git command '{command}' on path '{path}'")
     try:
+        session_manager = get_session_manager()
+        session_id = context.request_context.request.query_params.get("session_id") or "default"
+        state = session_manager.get_fs_state(session_id)
+        if state.phase != "edit":
+            raise ToolError("Cannot use the git tool in 'discovery' phase. Use file_system.lock_cwd() first.")
+
+        # Check if git repository is available
+        if not state.git_root:
+            raise ToolError("Git tool is not available because no git repository was found when locking the directory. Use file_system.lock_cwd() in a directory that contains a git repository.")
+
         tool = get_git_tool_provider()
         args = {
             "command": command,
@@ -300,6 +444,8 @@ async def git_tool(
             "base_commit": base_commit,
             "message": message,
             "add_path": add_path,
+            "file_path": file_path,
+            "_fs_state": state,
         }
         args = {k: v for k, v in args.items() if v is not None}
 
@@ -367,3 +513,44 @@ async def sequential_thinking(
     except Exception as e:
         logger.error(f"Error executing sequential_thinking: {e}", exc_info=True)
         return {"status": "error", "error": str(e), "exit_code": 1}
+
+# --- Static Prompts for FastMCP ---
+# These are static prompts that FastMCP can use without requiring arguments
+@mcp_app.prompt(title="Dynamic System Prompt")
+def dynamic_system_prompt() -> str:
+    """
+    Returns the complete system prompt that combines base prompt with phase-specific instructions.
+    This is a static prompt that FastMCP can use.
+    """
+    prompts = get_all_prompts()
+    base_prompt = prompts["base"]
+    # Default to discovery phase instructions for the static prompt
+    phase_instructions = prompts["discovery-instructions"]
+    return f"{base_prompt}\n{phase_instructions}"
+
+@mcp_app.prompt(title="Base System Prompt")
+def base_system_prompt() -> str:
+    """
+    Returns the base system prompt for the AI agent.
+    This is a static prompt that FastMCP can use.
+    """
+    prompts = get_all_prompts()
+    return prompts["base"]
+
+@mcp_app.prompt(title="Discovery Phase Instructions")
+def discovery_prompt() -> str:
+    """
+    Returns the discovery phase instructions.
+    This is a static prompt that FastMCP can use.
+    """
+    prompts = get_all_prompts()
+    return prompts["discovery-instructions"]
+
+@mcp_app.prompt(title="Edit Phase Instructions")
+def edit_prompt() -> str:
+    """
+    Returns the edit phase instructions.
+    This is a static prompt that FastMCP can use.
+    """
+    prompts = get_all_prompts()
+    return prompts["edit-instructions"]
